@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">System UI Helper</string>
+    <string name="as_desc">Controls screen and input for the local agent.</string>
+    <string name="ch_name">Agent</string>
+</resources>
