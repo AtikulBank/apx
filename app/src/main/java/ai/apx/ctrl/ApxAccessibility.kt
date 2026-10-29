@@ -102,7 +102,7 @@ class ApxAccessibility : AccessibilityService() {
     fun key(name: String): Boolean {
         val n = focusedEditable() ?: return false
         return when (name.lowercase()) {
-            "enter" -> if (Build.VERSION.SDK_INT >= 30) n.performAction(AccessibilityNodeInfo.ACTION_IME_ENTER)
+            "enter" -> if (Build.VERSION.SDK_INT >= 30) n.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
                        else n.performAction(AccessibilityNodeInfo.ACTION_CLICK)
             "del", "backspace" -> {
                 val t = n.text?.toString() ?: return false
