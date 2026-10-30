@@ -29,10 +29,10 @@ class MainActivity : AppCompatActivity() {
             setPadding(56, 120, 56, 56)
         }
         status = TextView(this).apply { textSize = 14f }
-        val b1 = Button(this).apply { text = "1 · Accessibility চালু করুন" }
-        val b2 = Button(this).apply { text = "2 · স্ক্রিন ক্যাপচার অনুমতি" }
-        val b3 = Button(this).apply { text = "3 · সার্ভিস চালু" }
-        val b4 = Button(this).apply { text = "4 · ব্যাটারি অপ্টিমাইজেশন বন্ধ" }
+        val b1 = Button(this).apply { text = "1 · Accessibility" }
+        val b2 = Button(this).apply { text = "2 · Screen capture" }
+        val b3 = Button(this).apply { text = "3 · Start service" }
+        val b4 = Button(this).apply { text = "4 · Battery unrestricted" }
 
         b1.setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         b2.setOnClickListener {
@@ -40,22 +40,17 @@ class MainActivity : AppCompatActivity() {
             startActivityForResult(m.createScreenCaptureIntent(), projReq)
         }
         b3.setOnClickListener {
-            ContextCompat.startForegroundService(
-                this, Intent(this, ApxService::class.java).setAction(ApxService.ACT_START)
-            )
-            Toast.makeText(this, "চালু হয়েছে", Toast.LENGTH_SHORT).show()
+            ContextCompat.startForegroundService(this, Intent(this, ApxService::class.java).setAction(ApxService.ACT_START))
+            Toast.makeText(this, "started", Toast.LENGTH_SHORT).show()
         }
-        b4.setOnClickListener {
-            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-        }
+        b4.setOnClickListener { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
         listOf(b1, b2, b3, b4).forEach { ll.addView(it) }
         ll.addView(status)
         setContentView(ScrollView(this).apply { addView(ll) })
 
         if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-            != PackageManager.PERMISSION_GRANTED
-        ) ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 7)
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 7)
     }
 
     override fun onResume() { super.onResume(); refresh() }
@@ -63,21 +58,17 @@ class MainActivity : AppCompatActivity() {
     private fun refresh() {
         status.text = "accessibility: ${if (ApxAccessibility.inst != null) "OK" else "OFF"}\n" +
             "server: ${if (ApxService.up) "127.0.0.1:${ApxService.PORT}" else "stopped"}\n" +
-            "capture: ${if (ApxService.projAlive) "granted" else "not granted"}"
+            "capture: ${if (ApxService.projAlive) "granted" else "not granted"}\n" +
+            "err: ${ApxService.lastErr.ifEmpty { "-" }}"
     }
 
     @Deprecated("deprecated")
     override fun onActivityResult(rq: Int, rc: Int, data: Intent?) {
         super.onActivityResult(rq, rc, data)
         if (rq == projReq && rc == Activity.RESULT_OK && data != null) {
-            ContextCompat.startForegroundService(
-                this,
-                Intent(this, ApxService::class.java)
-                    .setAction(ApxService.ACT_PROJ)
-                    .putExtra("data", data)
-                    .putExtra("rc", rc)
-            )
-            Toast.makeText(this, "অনুমতি দেওয়া হয়েছে", Toast.LENGTH_SHORT).show()
+            ContextCompat.startForegroundService(this, Intent(this, ApxService::class.java)
+                .setAction(ApxService.ACT_PROJ).putExtra("data", data).putExtra("rc", rc))
+            Toast.makeText(this, "sent", Toast.LENGTH_SHORT).show()
         }
         refresh()
     }

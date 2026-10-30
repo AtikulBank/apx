@@ -3,7 +3,6 @@ package ai.apx.ctrl
 import android.app.*
 import android.content.ClipData
 import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
@@ -35,6 +34,7 @@ class ApxService : Service() {
         const val CH = "apx"
         @Volatile var up = false
         @Volatile var projAlive = false
+        @Volatile var lastErr = ""
     }
 
     private var projection: MediaProjection? = null
@@ -46,99 +46,104 @@ class ApxService : Service() {
 
     override fun onBind(i: Intent?): IBinder? = null
 
+    private fun bothTypes(): Int =
+        if (Build.VERSION.SDK_INT >= 29)
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+        else ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+
     override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
-        when (i?.action) {
-            ACT_START -> {
-                fgs(ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC, "agent running")
-                startServer()
-            }
-            ACT_PROJ -> {
-                val data: Intent? = if (Build.VERSION.SDK_INT >= 33)
-                    i.getParcelableExtra("data", Intent::class.java)
-                else @Suppress("DEPRECATION") i.getParcelableExtra("data")
-                val rc = i.getIntExtra("rc", Activity.RESULT_OK)
-                if (data != null) {
-                    val type = if (Build.VERSION.SDK_INT >= 29)
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                    else ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                    fgs(type, "screen capture active")
+        try {
+            when (i?.action) {
+                ACT_START -> {
+                    fgs(bothTypes(), "agent running")
+                    startServer()
+                }
+                ACT_PROJ -> {
+                    @Suppress("DEPRECATION")
+                    val data: Intent? = i.getParcelableExtra("data")
+                    val rc = i.getIntExtra("rc", Activity.RESULT_OK)
+                    if (data == null) { lastErr = "extra-data-null"; return START_STICKY }
+                    fgs(bothTypes(), "capture granted")
+                    startServer()
                     setupProj(rc, data)
                 }
             }
+        } catch (e: Throwable) {
+            lastErr = e.javaClass.simpleName + ": " + e.message
         }
         return START_STICKY
     }
 
     private fun fgs(type: Int, text: String) {
         val mgr = getSystemService(NotificationManager::class.java)
-        if (mgr.getNotificationChannel(CH) == null) {
-            mgr.createNotificationChannel(
-                NotificationChannel(CH, "Agent", NotificationManager.IMPORTANCE_LOW)
-            )
-        }
+        if (mgr.getNotificationChannel(CH) == null)
+            mgr.createNotificationChannel(NotificationChannel(CH, "Agent", NotificationManager.IMPORTANCE_LOW))
         val n = NotificationCompat.Builder(this, CH)
             .setContentTitle("System UI Helper")
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_notif)
             .setOngoing(true)
             .build()
-        if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, type)
-        else startForeground(1, n)
+        if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, type) else startForeground(1, n)
     }
 
-    private fun metrics(): Point {
-        return if (Build.VERSION.SDK_INT >= 30) {
+    private fun metrics(): Point = try {
+        if (Build.VERSION.SDK_INT >= 30) {
             val b = getSystemService(WindowManager::class.java).currentWindowMetrics.bounds
             Point(b.width(), b.height())
-        } else {
-            val dm = resources.displayMetrics
-            Point(dm.widthPixels, dm.heightPixels)
-        }
-    }
+        } else Point(resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels)
+    } catch (e: Exception) { Point(1080, 1920) }
 
     private fun setupProj(rc: Int, data: Intent) {
         releaseCapture()
-        val mgr = getSystemService(MediaProjectionManager::class.java)
-        val p = try { mgr.getMediaProjection(rc, data) } catch (e: Exception) { null } ?: return
+        var p: MediaProjection? = null
+        var err = ""
+        for (a in 0..2) {
+            p = try {
+                getSystemService(MediaProjectionManager::class.java).getMediaProjection(rc, data)
+            } catch (e: Throwable) { err = e.javaClass.simpleName + ":" + e.message; null }
+            if (p != null) break
+            Thread.sleep(300)
+        }
+        if (p == null) { lastErr = "proj-fail " + err; return }
         projection = p
-        p.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() {
-                projAlive = false
-                releaseCapture()
-            }
-        }, main)
+        try {
+            p.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() { projAlive = false; lastErr = "stopped"; releaseCapture() }
+            }, main)
+        } catch (e: Throwable) { lastErr = "cb:" + e.message }
         projAlive = true
         createVD()
     }
 
     private fun createVD() {
-        val p = projection ?: return
-        val pt = metrics()
-        val dpi = resources.displayMetrics.densityDpi
+        val p = projection ?: run { lastErr = "no-projection"; return }
         try {
-            reader?.close()
-        } catch (_: Exception) {}
-        reader = ImageReader.newInstance(pt.x, pt.y, PixelFormat.RGBA_8888, 2)
-        vdisplay = p.createVirtualDisplay(
-            "apx", pt.x, pt.y, dpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            reader!!.surface, null, main
-        )
+            val pt = metrics()
+            val dpi = resources.displayMetrics.densityDpi
+            try { reader?.close() } catch (_: Exception) {}
+            reader = ImageReader.newInstance(pt.x, pt.y, PixelFormat.RGBA_8888, 2)
+            vdisplay = p.createVirtualDisplay("apx", pt.x, pt.y, dpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader!!.surface, null, main)
+            lastErr = ""
+        } catch (e: Throwable) {
+            lastErr = "vd " + e.javaClass.simpleName + ":" + e.message
+            projAlive = false
+        }
     }
 
     private fun releaseCapture() {
         try { vdisplay?.release() } catch (_: Exception) {}
         try { reader?.close() } catch (_: Exception) {}
-        vdisplay = null
-        reader = null
+        vdisplay = null; reader = null
     }
 
     private fun capture(): ByteArray? {
         val r = reader ?: return null
         var img: Image? = null
-        val deadline = System.currentTimeMillis() + 2500
-        while (System.currentTimeMillis() < deadline) {
+        val dl = System.currentTimeMillis() + 2500
+        while (System.currentTimeMillis() < dl) {
             img = try { r.acquireLatestImage() } catch (e: Exception) { null }
             if (img != null) break
             Thread.sleep(60)
@@ -153,7 +158,8 @@ class ApxService : Service() {
             crop.compress(Bitmap.CompressFormat.JPEG, 70, bo)
             bmp.recycle(); crop.recycle(); bo.close()
             bo.toByteArray()
-        } catch (e: Exception) { null } finally { try { img.close() } catch (_: Exception) {} }
+        } catch (e: Exception) { lastErr = "cap:" + e.message; null }
+        finally { try { img.close() } catch (_: Exception) {} }
     }
 
     private fun startServer() {
@@ -174,18 +180,15 @@ class ApxService : Service() {
     private fun route(path: String, q: Map<String, String>): HttpServer.Resp {
         val a = ApxAccessibility.inst
         return when (path) {
-            "/ping" -> ok("ok|acc=${a != null}|proj=$projAlive")
+            "/ping" -> ok("ok|acc=${a != null}|proj=$projAlive|err=$lastErr")
             "/shot" -> {
                 val b = capture()
-                if (b == null) HttpServer.Resp(503, "text/plain", "need-grant".toByteArray())
+                if (b == null) HttpServer.Resp(503, "text/plain", ("need-grant|" + lastErr).toByteArray())
                 else HttpServer.Resp(200, "image/jpeg", b)
             }
             "/tap" -> ok(if (a?.tap(q["x"]!!.toFloat(), q["y"]!!.toFloat()) == true) "ok" else "fail")
-            "/swipe" -> ok(
-                if (a?.swipe(q["x1"]!!.toFloat(), q["y1"]!!.toFloat(),
-                        q["x2"]!!.toFloat(), q["y2"]!!.toFloat(),
-                        (q["ms"] ?: "250").toLong()) == true) "ok" else "fail"
-            )
+            "/swipe" -> ok(if (a?.swipe(q["x1"]!!.toFloat(), q["y1"]!!.toFloat(),
+                q["x2"]!!.toFloat(), q["y2"]!!.toFloat(), (q["ms"] ?: "250").toLong()) == true) "ok" else "fail")
             "/global" -> ok(if (a?.global(q["a"] ?: "") == true) "ok" else "fail")
             "/text" -> ok(if (a?.setText(b64(q["b"])) == true) "ok" else "fail")
             "/paste" -> {
@@ -198,28 +201,22 @@ class ApxService : Service() {
             "/scroll" -> ok(if (a?.scroll(q["d"] != "up") == true) "ok" else "fail")
             "/nodes" -> ok(a?.dump() ?: "no-service")
             "/click" -> ok(if (a?.clickText(q["s"] ?: "") == true) "ok" else "fail")
-            "/clip" -> {
-                val cm = getSystemService(ClipboardManager::class.java)
-                ok(cm.primaryClip?.getItemAt(0)?.text?.toString() ?: "")
-            }
+            "/clip" -> ok(getSystemService(ClipboardManager::class.java)
+                .primaryClip?.getItemAt(0)?.text?.toString() ?: "")
             "/apps" -> {
-                val pm = packageManager
                 val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                val list = pm.queryIntentActivities(i, 0)
-                ok(list.joinToString("\n") { "${it.activityInfo.packageName} | ${it.loadLabel(pm)}" })
+                ok(packageManager.queryIntentActivities(i, 0).joinToString("\n") {
+                    "${it.activityInfo.packageName} | ${it.loadLabel(packageManager)}" })
             }
             "/launch" -> {
-                val pkg = q["pkg"] ?: ""
-                val i = packageManager.getLaunchIntentForPackage(pkg)
-                if (i == null) ok("nopkg") else {
-                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); ok("ok")
-                }
+                val i = packageManager.getLaunchIntentForPackage(q["pkg"] ?: "")
+                if (i == null) ok("nopkg") else { i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(i); ok("ok") }
             }
             "/battery" -> {
                 val b = registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED))
                 ok("${b?.getIntExtra("level", 0)}|${b?.getIntExtra("status", 0)}")
             }
-            "/grant" -> ok(if (projAlive) "ok" else "no")
+            "/grant" -> ok("${if (projAlive) "ok" else "no"}|$lastErr")
             else -> HttpServer.Resp(404, "text/plain", "404".toByteArray())
         }
     }
@@ -227,8 +224,7 @@ class ApxService : Service() {
     override fun onDestroy() {
         srv?.stop(); srv = null; up = false
         try { projection?.stop() } catch (_: Exception) {}
-        releaseCapture()
-        exec.shutdown()
+        releaseCapture(); exec.shutdown()
         super.onDestroy()
     }
 }
